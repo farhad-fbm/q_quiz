@@ -2,13 +2,18 @@
 
 
 
-
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, filedialog
 import google.generativeai as genai
 import json
 import time
 import threading
+import os
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
 
 # === CONFIGURE GEMINI ===
 genai.configure(api_key="AIzaSyDe2fhOZTen8cGasIijZYdYhB5pqz6NRgY")  # Replace with your actual API key
@@ -37,7 +42,7 @@ def generate_quiz(topic):
     try:
         text = response.text.strip()
 
-        # Remove markdown code block formatting if present
+      # Remove markdown code block formatting if present
         if text.startswith("```json"):
             text = text[7:]  # Remove ```json
         elif text.startswith("```"):
@@ -51,15 +56,102 @@ def generate_quiz(topic):
         print("JSON decode error:", e)
         return []
 
+# === PDF GENERATOR ===
+def generate_quiz_pdf(filename, topic, questions, user_answers, score):
+    doc = SimpleDocTemplate(filename, pagesize=letter)
+    styles = getSampleStyleSheet()
+    
+    # Create custom styles
+    title_style = ParagraphStyle(
+        'Title',
+        parent=styles['Title'],
+        fontSize=16,
+        spaceAfter=12
+    )
+    
+    heading_style = ParagraphStyle(
+        'Heading',
+        parent=styles['Heading2'],
+        fontSize=14,
+        spaceAfter=6
+    )
+    
+    normal_style = ParagraphStyle(
+        'Normal',
+        parent=styles['Normal'],
+        fontSize=12,
+        spaceAfter=6
+    )
+    
+    # Create the content
+    content = []
+    
+    # Add title
+    content.append(Paragraph(f"Quiz Review: {topic}", title_style))
+    content.append(Spacer(1, 0.25*inch))
+    
+    # Add score
+    content.append(Paragraph(f"Score: {score}/{len(questions)}", heading_style))
+    content.append(Spacer(1, 0.25*inch))
+    
+    # Add questions and answers
+    for i, q in enumerate(questions):
+        # Question
+        content.append(Paragraph(f"Question {i+1}: {q['question']}", heading_style))
+        
+        # Options with highlighting
+        data = []
+        for opt in q['options']:
+            if opt == q['answer'] and opt == user_answers[i]:
+                # Correct answer and user selected it
+                data.append([Paragraph(f"✓ {opt}", normal_style)])
+            elif opt == q['answer']:
+                # Correct answer but user didn't select it
+                data.append([Paragraph(f"✓ {opt} (Correct answer)", normal_style)])
+            elif opt == user_answers[i]:
+                # User selected this but it's wrong
+                data.append([Paragraph(f"✗ {opt} (Your answer)", normal_style)])
+            else:
+                # Other option
+                data.append([Paragraph(opt, normal_style)])
+        
+        # Create table for options
+        table = Table(data, colWidths=[5*inch])
+        
+        # Add table style with colors
+        table_style = TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+        ])
+        
+        # Add color highlighting
+        for row, opt in enumerate(q['options']):
+            if opt == q['answer']:
+                # Correct answer - green
+                table_style.add('BACKGROUND', (0, row), (0, row), colors.lightgreen)
+                table_style.add('TEXTCOLOR', (0, row), (0, row), colors.darkgreen)
+            elif opt == user_answers[i] and opt != q['answer']:
+                # User's incorrect answer - red
+                table_style.add('BACKGROUND', (0, row), (0, row), colors.mistyrose)
+                table_style.add('TEXTCOLOR', (0, row), (0, row), colors.darkred)
+        
+        table.setStyle(table_style)
+        content.append(table)
+        content.append(Spacer(1, 0.25*inch))
+    
+    # Build the PDF
+    doc.build(content)
+
 # === QUIZ APP CLASS ===
 class QuizApp:
-    def __init__(self, root, questions, parent_window):
+    def __init__(self, root, questions, parent_window, topic):
         self.root = root
         self.root.title("Q Quiz AI Edition")
-        self.root.geometry("600x450")
+        self.root.geometry("600x500")  # Made slightly taller for the download button
         
         self.parent_window = parent_window
         self.questions = questions
+        self.topic = topic
         self.q_no = 0
         self.score = 0
         self.user_answers = [""] * len(questions)
@@ -122,7 +214,7 @@ class QuizApp:
         
         # Navigation buttons frame
         button_frame = tk.Frame(self.root)
-        button_frame.pack(fill="x", padx=20, pady=20)
+        button_frame.pack(fill="x", padx=20, pady=10)
         
         self.prev_btn = tk.Button(button_frame, text="Previous", command=self.prev_question, width=10)
         self.prev_btn.pack(side="left", padx=5)
@@ -135,6 +227,22 @@ class QuizApp:
         
         self.gen_btn = tk.Button(button_frame, text="New Quiz", command=self.return_to_generator, width=10)
         self.gen_btn.pack(side="right", padx=5)
+        
+        # Download PDF button (initially hidden)
+        self.download_frame = tk.Frame(self.root)
+        self.download_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.download_btn = tk.Button(
+            self.download_frame, 
+            text="Download Results as PDF", 
+            command=self.download_pdf,
+            bg="#4CAF50",
+            fg="white",
+            font=("Arial", 12, "bold"),
+            height=2
+        )
+        self.download_btn.pack(fill="x")
+        self.download_frame.pack_forget()  # Hide initially
 
     def display_question(self):
         if self.q_no >= len(self.questions):
@@ -242,8 +350,48 @@ class QuizApp:
         self.timer_label.pack_forget()
         self.review_label.pack(side="left")
         
+        # Show download button
+        self.download_frame.pack(fill="x", padx=20, pady=10)
+        
         self.q_no = 0  # Start review from the first question
         self.display_question()
+
+    def download_pdf(self):
+        """Generate and download a PDF with quiz results"""
+        try:
+            # Ask user where to save the PDF
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("PDF files", "*.pdf")],
+                title="Save Quiz Results"
+            )
+            
+            if not file_path:  # User cancelled
+                return
+                
+            # Generate the PDF
+            generate_quiz_pdf(
+                file_path, 
+                self.topic, 
+                self.questions, 
+                self.user_answers, 
+                self.score
+            )
+            
+            messagebox.showinfo("Success", f"Quiz results saved to {file_path}")
+            
+            # Try to open the PDF
+            try:
+                if os.name == 'nt':  # Windows
+                    os.startfile(file_path)
+                elif os.name == 'posix':  # macOS or Linux
+                    import subprocess
+                    subprocess.call(('open', file_path) if os.name == 'darwin' else ('xdg-open', file_path))
+            except:
+                pass  # Silently fail if we can't open the PDF
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate PDF: {str(e)}")
 
     def start_timer(self):
         def update_timer():
@@ -300,7 +448,7 @@ class QuizGenerator:
         
         # Open quiz window
         quiz_window = tk.Toplevel(self.root)
-        QuizApp(quiz_window, questions, self.root)
+        QuizApp(quiz_window, questions, self.root, topic)
         self.start_btn.config(state="normal")
 
 # === MAIN ===
