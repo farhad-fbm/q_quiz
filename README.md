@@ -34,5 +34,4 @@ Q Quiz AI is an intelligent quiz application that uses Google's Generative AI to
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/q-quiz-ai.git
-   cd q-quiz-ai
+   git clone https://github.com/farhad-fbm/q_quiz.git
